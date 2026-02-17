@@ -13,11 +13,14 @@ set, press MACROPAD keys to send key sequences and other USB protocols.
 
 import os
 import time
+import supervisor
+import sys
 import displayio
 import terminalio
 from adafruit_display_shapes.rect import Rect
 from adafruit_display_text import label
 from adafruit_macropad import MacroPad
+from adafruit_hid.consumer_control_code import ConsumerControlCode
 
 
 # CONFIGURABLES ------------------------
@@ -102,20 +105,63 @@ if not apps:
     while True:
         pass
 
-last_position = None
+last_position = macropad.encoder
 last_encoder_switch = macropad.encoder_switch_debounced.pressed
 app_index = 0
 apps[app_index].switch()
+
+default_app_index = 0
+for i, a in enumerate(apps):
+    if a.name == 'Default':
+        default_app_index = i
+        break
+
+serial_buf = ""
+SERIAL_BUF_MAX = 64
 
 
 # MAIN LOOP ----------------------------
 
 while True:
-    # Read encoder position. If it's changed, switch apps.
+    # Read serial input from host (app name detection)
+    if supervisor.runtime.serial_bytes_available:
+        c = sys.stdin.read(1)
+        if c in ('\n', '\r'):
+            if serial_buf:
+                # Fuzzy match: find the app page whose name best matches
+                app_lower = serial_buf.lower()
+                best_idx = default_app_index
+                best_len = 0
+                app_words = app_lower.replace('.', ' ').split()
+                for i, a in enumerate(apps):
+                    name_words = a.name.lower().split()
+                    if name_words == ['default']:
+                        continue
+                    for word in app_words:
+                        if word in name_words and len(word) > best_len:
+                            best_idx = i
+                            best_len = len(word)
+                app_index = best_idx
+                apps[app_index].switch()
+                last_position = macropad.encoder
+                serial_buf = ""
+        else:
+            serial_buf += c
+            if len(serial_buf) > SERIAL_BUF_MAX:
+                serial_buf = ""
+
+    # Read encoder position. If it's changed, adjust volume (default behavior).
     position = macropad.encoder
     if position != last_position:
-        app_index = position % len(apps)
-        apps[app_index].switch()
+        delta = position - last_position
+        if delta > 0:
+            macropad.consumer_control.release()
+            macropad.consumer_control.press(ConsumerControlCode.VOLUME_INCREMENT)
+            macropad.consumer_control.release()
+        elif delta < 0:
+            macropad.consumer_control.release()
+            macropad.consumer_control.press(ConsumerControlCode.VOLUME_DECREMENT)
+            macropad.consumer_control.release()
         last_position = position
 
     # Handle encoder button. If state has changed, and if there's a
@@ -170,22 +216,31 @@ while True:
                     if isinstance(code, float):
                         time.sleep(code)
             elif isinstance(item, dict):
-                if 'buttons' in item:
-                    if item['buttons'] >= 0:
-                        macropad.mouse.press(item['buttons'])
-                    else:
-                        macropad.mouse.release(-item['buttons'])
-                macropad.mouse.move(item['x'] if 'x' in item else 0,
-                                    item['y'] if 'y' in item else 0,
-                                    item['wheel'] if 'wheel' in item else 0)
-                if 'tone' in item:
-                    if item['tone'] > 0:
-                        macropad.stop_tone()
-                        macropad.start_tone(item['tone'])
-                    else:
-                        macropad.stop_tone()
-                elif 'play' in item:
-                    macropad.play_file(item['play'])
+                if 'serial_cmd' in item:
+                    print(item['serial_cmd'])
+                elif 'app_select' in item:
+                    for i, a in enumerate(apps):
+                        if a.name != 'Default':
+                            app_index = i
+                            apps[app_index].switch()
+                            break
+                else:
+                    if 'buttons' in item:
+                        if item['buttons'] >= 0:
+                            macropad.mouse.press(item['buttons'])
+                        else:
+                            macropad.mouse.release(-item['buttons'])
+                    macropad.mouse.move(item['x'] if 'x' in item else 0,
+                                        item['y'] if 'y' in item else 0,
+                                        item['wheel'] if 'wheel' in item else 0)
+                    if 'tone' in item:
+                        if item['tone'] > 0:
+                            macropad.stop_tone()
+                            macropad.start_tone(item['tone'])
+                        else:
+                            macropad.stop_tone()
+                    elif 'play' in item:
+                        macropad.play_file(item['play'])
     else:
         # Release any still-pressed keys, consumer codes, mouse buttons
         # Keys and mouse buttons are individually released this way (rather
